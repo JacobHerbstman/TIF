@@ -1,0 +1,31 @@
+# #################################################
+# ## Generic gitignore for a task-based workflow
+# #################################################
+
+# --- System & Editor Files ---
+.DS_Store
+.Rhistory
+__pycache__/
+node_modules/
+
+# --- Log files ---
+*.log
+slurmlogs/
+
+# --- Raw & Intermediate Data ---
+# Ignore the entire raw data directory
+data_raw/
+
+# Ignore the contents of all task input/output/temp folders
+tasks/*/input/
+tasks/*/output/
+tasks/*/temp/
+tasks/**/input/
+tasks/**/output/
+tasks/**/temp/
+
+# --- Secrets ---
+.Renviron
+
+# Ignore auto-generated R graphics in any code/ folder
+**/code/Rplots.pdf
