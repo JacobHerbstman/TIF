@@ -277,7 +277,24 @@ def collect_attachments(matters):
 
 
 def try_download_pdf(url, out_path):
-    proc = run_cmd(["curl", "-sSL", "--fail", "--connect-timeout", "8", "--max-time", "25", url, "-o", str(out_path)])
+    proc = run_cmd(
+        [
+            "curl",
+            "-sSL",
+            "--fail",
+            "--connect-timeout",
+            "8",
+            "--max-time",
+            "25",
+            "-H",
+            "User-Agent: Mozilla/5.0",
+            "-H",
+            "Accept: application/pdf,*/*;q=0.8",
+            url,
+            "-o",
+            str(out_path),
+        ]
+    )
     if proc.returncode != 0:
         return False, proc.stderr.strip()
 
@@ -295,6 +312,33 @@ def try_download_pdf(url, out_path):
         return False, "not a PDF"
 
     return True, ""
+
+
+def probe_http_code(url):
+    proc = run_cmd(
+        [
+            "curl",
+            "-sS",
+            "-L",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
+            "--connect-timeout",
+            "8",
+            "--max-time",
+            "20",
+            "-H",
+            "User-Agent: Mozilla/5.0",
+            url,
+        ]
+    )
+    if proc.returncode != 0:
+        return None, proc.stderr.strip()
+    code = safe_int((proc.stdout or "").strip())
+    if code == 0:
+        return None, "http 000"
+    return code, ""
 
 
 def download_pdfs(attachments, pdf_dir, max_pdf, max_pdf_attempts, legistar_token=None):
@@ -337,14 +381,14 @@ def download_pdfs(attachments, pdf_dir, max_pdf, max_pdf_attempts, legistar_toke
         api_file = f"https://webapi.legistar.com/v1/chicago/matters/{mid}/attachments/{aid}/file"
 
         if legistar_token:
-            candidates.append(f"{api_file}?token={quote(legistar_token)}")
-            candidates.append(f"{api_file}?key={quote(legistar_token)}")
-
-        if link:
-            candidates.append(link)
+            candidates.append(("api_token", f"{api_file}?token={quote(legistar_token)}"))
+            candidates.append(("api_key", f"{api_file}?key={quote(legistar_token)}"))
 
         if guid:
-            candidates.append(f"https://chicago.legistar.com/View.ashx?M=F&ID={aid}&GUID={guid}")
+            candidates.append(("view_guid", f"https://chicago.legistar.com/View.ashx?M=F&ID={aid}&GUID={guid}"))
+
+        if link:
+            candidates.append(("hyperlink", link))
 
         success = False
         last_err = "no candidate urls"
@@ -352,7 +396,22 @@ def download_pdfs(attachments, pdf_dir, max_pdf, max_pdf_attempts, legistar_toke
 
         attempted += 1
 
-        for url in candidates:
+        for source, url in candidates:
+            code, probe_err = probe_http_code(url)
+            if code is not None:
+                if code == 403 and "webapi.legistar.com" in url and not legistar_token:
+                    last_err = "api token required"
+                    continue
+                if code in {404, 410}:
+                    last_err = f"http {code}"
+                    continue
+                if code >= 400:
+                    last_err = f"http {code}"
+                    continue
+            elif probe_err:
+                last_err = f"probe failed: {probe_err}"
+                continue
+
             ok, err = try_download_pdf(url, out)
             if ok:
                 success = True

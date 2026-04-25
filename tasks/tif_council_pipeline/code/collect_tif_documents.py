@@ -681,6 +681,7 @@ def parse_args():
     p = argparse.ArgumentParser(description="Collect TIF legislation and annual-report PDFs")
     p.add_argument("--input-dir", default="../input")
     p.add_argument("--output-dir", default="../output")
+    p.add_argument("--skip-elms", type=int, default=0, help="1 to skip all eLMS search/detail/pdf work")
     p.add_argument("--max-matters", type=int, default=3000)
     p.add_argument("--term-index", type=int, default=-1, help="Use one eLMS term index (default -1 runs all terms)")
     p.add_argument("--start-skip", type=int, default=0, help="eLMS /matter pagination skip offset")
@@ -718,49 +719,65 @@ def main():
     )
 
     resume_ids = set()
-    resume_ids.update(load_seen_matter_ids(out_elms_matters))
-    resume_ids.update(load_attachment_matter_ids(out_elms_attachments))
-    if args.resume_from_csv:
-        resume_ids.update(load_seen_matter_ids(Path(args.resume_from_csv).resolve()))
+    matter_rows = []
+    attachment_rows = []
+    detail_failures = 0
+    detail_calls = 0
+    detail_skipped_cap = 0
+    matters_appended = 0
+    matters_skipped = 0
+    attachments_appended = 0
+    attachments_skipped = 0
+    elms_pdf_status_appended = 0
+    elms_pdf_status_skipped = 0
+    elms_pdf_attempted = 0
+    elms_pdf_downloaded = 0
+    elms_pdf_failed = 0
 
-    matter_map, keyword_hits, term_rows, term_meta = collect_elms_matters(
-        args.max_matters,
-        term_index=args.term_index,
-        start_skip=args.start_skip,
-        seen_matter_ids=resume_ids,
-    )
-    matter_rows, attachment_rows, matter_json, detail_failures, detail_calls, detail_skipped_cap = (
-        build_elms_matter_and_attachment_tables(
-            matter_map,
-            keyword_hits,
-            fetch_details=(args.elms_fetch_details == 1),
-            max_detail_calls=args.max_detail_calls,
+    if args.skip_elms != 1:
+        resume_ids.update(load_seen_matter_ids(out_elms_matters))
+        resume_ids.update(load_attachment_matter_ids(out_elms_attachments))
+        if args.resume_from_csv:
+            resume_ids.update(load_seen_matter_ids(Path(args.resume_from_csv).resolve()))
+
+        matter_map, keyword_hits, term_rows, term_meta = collect_elms_matters(
+            args.max_matters,
+            term_index=args.term_index,
+            start_skip=args.start_skip,
+            seen_matter_ids=resume_ids,
         )
-    )
+        matter_rows, attachment_rows, matter_json, detail_failures, detail_calls, detail_skipped_cap = (
+            build_elms_matter_and_attachment_tables(
+                matter_map,
+                keyword_hits,
+                fetch_details=(args.elms_fetch_details == 1),
+                max_detail_calls=args.max_detail_calls,
+            )
+        )
 
-    write_json(elms_dir / "tif_elms_matters_raw.json", matter_json)
-    write_csv(
-        output_dir / "tif_elms_search_term_counts.csv",
-        term_meta,
-        [
-            "term_index",
-            "search_term",
-            "start_skip",
-            "next_skip",
-            "status",
-            "meta_count",
-            "rows_fetched",
-            "new_matters_added",
-            "rows_skipped_seen",
-            "rows_skipped_pre2010",
-            "note",
-        ],
-    )
-    write_csv(
-        output_dir / "tif_elms_search_hits.csv",
-        term_rows,
-        ["term_index", "search_term", "matter_id", "record_number"],
-    )
+        write_json(elms_dir / "tif_elms_matters_raw.json", matter_json)
+        write_csv(
+            output_dir / "tif_elms_search_term_counts.csv",
+            term_meta,
+            [
+                "term_index",
+                "search_term",
+                "start_skip",
+                "next_skip",
+                "status",
+                "meta_count",
+                "rows_fetched",
+                "new_matters_added",
+                "rows_skipped_seen",
+                "rows_skipped_pre2010",
+                "note",
+            ],
+        )
+        write_csv(
+            output_dir / "tif_elms_search_hits.csv",
+            term_rows,
+            ["term_index", "search_term", "matter_id", "record_number"],
+        )
     matters_fields = [
         "matter_id",
         "record_number",
@@ -792,29 +809,30 @@ def main():
         "attachment_file",
     ]
 
-    matters_appended, matters_skipped = append_csv_unique(
-        out_elms_matters,
-        matter_rows,
-        matters_fields,
-        ["matter_id", "detail_fetched"],
-    )
-    attachments_appended, attachments_skipped = append_csv_unique(
-        out_elms_attachments,
-        attachment_rows,
-        attachments_fields,
-        ["matter_id", "attachment_uid"],
-    )
+    if args.skip_elms != 1:
+        matters_appended, matters_skipped = append_csv_unique(
+            out_elms_matters,
+            matter_rows,
+            matters_fields,
+            ["matter_id", "detail_fetched"],
+        )
+        attachments_appended, attachments_skipped = append_csv_unique(
+            out_elms_attachments,
+            attachment_rows,
+            attachments_fields,
+            ["matter_id", "attachment_uid"],
+        )
 
-    elms_pdf_status, elms_pdf_attempted, elms_pdf_downloaded, elms_pdf_failed = download_elms_pdfs(
-        attachment_rows, elms_pdf_dir, args.max_elms_pdf
-    )
-    elms_pdf_status_fields = ["matter_id", "record_number", "attachment_uid", "url", "status", "error", "bytes", "local_path"]
-    elms_pdf_status_appended, elms_pdf_status_skipped = append_csv_unique(
-        out_elms_pdf_status,
-        elms_pdf_status,
-        elms_pdf_status_fields,
-        ["matter_id", "attachment_uid", "status"],
-    )
+        elms_pdf_status, elms_pdf_attempted, elms_pdf_downloaded, elms_pdf_failed = download_elms_pdfs(
+            attachment_rows, elms_pdf_dir, args.max_elms_pdf
+        )
+        elms_pdf_status_fields = ["matter_id", "record_number", "attachment_uid", "url", "status", "error", "bytes", "local_path"]
+        elms_pdf_status_appended, elms_pdf_status_skipped = append_csv_unique(
+            out_elms_pdf_status,
+            elms_pdf_status,
+            elms_pdf_status_fields,
+            ["matter_id", "attachment_uid", "status"],
+        )
 
     if args.skip_annual_reports == 1:
         year_pages = []
@@ -845,6 +863,7 @@ def main():
         )
 
     summary_rows = [
+        {"metric": "skip_elms_mode", "value": args.skip_elms},
         {"metric": "elms_resume_seen_matter_ids", "value": len(resume_ids)},
         {"metric": "elms_term_index", "value": args.term_index},
         {"metric": "elms_start_skip", "value": args.start_skip},
@@ -878,7 +897,10 @@ def main():
 
     print("Document harvest finished")
     print(f"Output summary: {output_dir / 'tif_document_harvest_summary.csv'}")
-    print(f"eLMS matters appended: {matters_appended}; attachments appended: {attachments_appended}; pdf status appended: {elms_pdf_status_appended}")
+    if args.skip_elms == 1:
+        print("eLMS skipped (skip_elms=1).")
+    else:
+        print(f"eLMS matters appended: {matters_appended}; attachments appended: {attachments_appended}; pdf status appended: {elms_pdf_status_appended}")
 
 
 if __name__ == "__main__":
