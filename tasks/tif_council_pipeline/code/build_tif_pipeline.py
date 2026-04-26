@@ -116,6 +116,18 @@ def safe_int(x):
     return int(m.group(0))
 
 
+def date_year(x):
+    if x is None:
+        return None
+    s = str(x).strip()
+    if s == "":
+        return None
+    m = re.search(r"\b(?:19|20)\d{2}\b", s)
+    if m:
+        return int(m.group(0))
+    return safe_int(s)
+
+
 def safe_float(x):
     if x is None:
         return None
@@ -134,6 +146,11 @@ def norm_text(s):
     s = str(s).strip().lower()
     s = re.sub(r"[^a-z0-9]+", " ", s)
     return re.sub(r"\s+", " ", s).strip()
+
+
+def tif_number_sort_key(value):
+    m = re.search(r"(\d{1,3})", str(value or ""))
+    return int(m.group(1)) if m else 999999
 
 
 def read_csv(path):
@@ -766,16 +783,16 @@ def choose_boundary_for_year(boundaries, year):
     if year is not None:
         valid = []
         for b in boundaries:
-            start_year = safe_int(b.get("approval_d")) or 0
-            end_year = safe_int(b.get("repealed_d"))
+            start_year = date_year(b.get("approval_d")) or 0
+            end_year = date_year(b.get("repealed_d"))
             if end_year is None:
-                end_year = safe_int(b.get("expiration")) or 9999
+                end_year = date_year(b.get("expiration")) or 9999
             if start_year <= year <= end_year:
                 valid.append(b)
         if valid:
             valid.sort(
                 key=lambda r: (
-                    safe_int(r.get("approval_d")) or 0,
+                    date_year(r.get("approval_d")) or 0,
                     safe_float(r.get("shape_area")) or 0.0,
                 ),
                 reverse=True,
@@ -786,7 +803,7 @@ def choose_boundary_for_year(boundaries, year):
         boundaries,
         key=lambda r: (
             1 if not (r.get("repealed_d") or "").strip() else 0,
-            safe_int(r.get("approval_d")) or 0,
+            date_year(r.get("approval_d")) or 0,
             safe_float(r.get("shape_area")) or 0.0,
         ),
         reverse=True,
@@ -1278,6 +1295,283 @@ def build_full_district_year(legacy_panel_csv, modern_panel_csv, out_csv):
             "fund_balance", "project_count", "project_payments_current", "increment_projected", "increment_actual",
         ],
     )
+
+
+def build_district_universe(
+    full_panel_csv,
+    district_boundaries_csv,
+    programming_csv,
+    projects_by_year_csv,
+    document_inventory_csv,
+    out_district_csv,
+    out_year_csv,
+    out_summary_csv,
+    start_year=1981,
+    end_year=2027,
+):
+    names = {}
+    meta = {}
+    year_sources = {}
+    intervals = {}
+    observed_years = {}
+
+    def ensure_tif(tif):
+        if tif not in meta:
+            meta[tif] = {
+                "has_legacy_finance": 0,
+                "has_modern_panel": 0,
+                "has_annual_projects": 0,
+                "has_programming": 0,
+                "has_boundary": 0,
+                "has_annual_report_pdf": 0,
+                "approval_dates": set(),
+                "expiration_dates": set(),
+                "repeal_dates": set(),
+                "source_flags": set(),
+            }
+            names[tif] = {}
+            intervals[tif] = []
+            observed_years[tif] = set()
+        return meta[tif]
+
+    def add_name(tif, name, source, weight=1):
+        name = (name or "").strip()
+        if not name:
+            return
+        ensure_tif(tif)
+        key = norm_text(name)
+        if not key:
+            return
+        item = names[tif].setdefault(key, {"name": name, "weight": 0, "sources": set()})
+        item["weight"] += weight
+        item["sources"].add(source)
+
+    def add_date(meta_row, field, value):
+        value = (value or "").strip()
+        if value:
+            meta_row[field].add(value)
+
+    def add_interval(tif, source, start_value, end_value, name="", repeal_value=""):
+        start = date_year(start_value)
+        end = date_year(repeal_value) or date_year(end_value)
+        if start is None:
+            return
+        ensure_tif(tif)
+        intervals[tif].append(
+            {
+                "source": source,
+                "start_year": start,
+                "end_year": end,
+                "name": name,
+            }
+        )
+        add_name(tif, name, source, weight=2)
+
+    def add_year(tif, year, source, name=""):
+        tif = normalize_tif_number(tif)
+        year = safe_int(year)
+        if not tif or year is None:
+            return
+        if year < start_year or year > end_year:
+            return
+        ensure_tif(tif)
+        observed_years[tif].add(year)
+        year_sources.setdefault((tif, year), set()).add(source)
+        meta[tif]["source_flags"].add(source)
+        add_name(tif, name, source, weight=3)
+
+    def best_name(tif):
+        vals = list(names.get(tif, {}).values())
+        if not vals:
+            return ""
+        vals.sort(key=lambda x: (x["weight"], len(x["name"]), x["name"].lower()), reverse=True)
+        return vals[0]["name"]
+
+    full_panel = read_csv(full_panel_csv) if full_panel_csv.exists() else []
+    for r in full_panel:
+        tif = normalize_tif_number(r.get("tif_number", ""))
+        if not tif:
+            continue
+        source = r.get("source", "") or "district_year_panel"
+        source_flag = "legacy_finance" if source.startswith("legacy") else "modern_panel"
+        add_year(tif, r.get("year"), source_flag, r.get("tif_district", ""))
+        m = ensure_tif(tif)
+        if source_flag == "legacy_finance":
+            m["has_legacy_finance"] = 1
+        else:
+            m["has_modern_panel"] = 1
+
+    boundaries = read_csv(district_boundaries_csv) if district_boundaries_csv.exists() else []
+    for r in boundaries:
+        tif = normalize_tif_number(r.get("tif_number", ""))
+        if not tif:
+            continue
+        m = ensure_tif(tif)
+        m["has_boundary"] = 1
+        m["source_flags"].add("boundary")
+        add_name(tif, r.get("tif_name", ""), "boundary", weight=2)
+        add_date(m, "approval_dates", r.get("approval_d", ""))
+        add_date(m, "expiration_dates", r.get("expiration", ""))
+        add_date(m, "repeal_dates", r.get("repealed_d", ""))
+        add_interval(tif, "boundary", r.get("approval_d", ""), r.get("expiration", ""), r.get("tif_name", ""), r.get("repealed_d", ""))
+
+    programming = read_csv(programming_csv) if programming_csv.exists() else []
+    for r in programming:
+        tif = normalize_tif_number(r.get("tif_number", ""))
+        if not tif:
+            continue
+        m = ensure_tif(tif)
+        m["has_programming"] = 1
+        m["source_flags"].add("programming")
+        add_year(tif, r.get("time_period"), "programming", r.get("tif_name", ""))
+        add_date(m, "approval_dates", r.get("designation_date", ""))
+        add_date(m, "expiration_dates", r.get("expiration_date", ""))
+        add_interval(tif, "programming", r.get("designation_date", ""), r.get("expiration_date", ""), r.get("tif_name", ""))
+
+    annual_projects = read_csv(projects_by_year_csv) if projects_by_year_csv.exists() else []
+    for r in annual_projects:
+        tif = normalize_tif_number(r.get("tif_number", ""))
+        if not tif:
+            continue
+        ensure_tif(tif)["has_annual_projects"] = 1
+        add_year(tif, r.get("report_year"), "annual_projects", r.get("tif_district", ""))
+
+    if document_inventory_csv.exists():
+        for r in read_csv(document_inventory_csv):
+            if r.get("source", "") != "annual_report":
+                continue
+            tif = normalize_tif_number(r.get("tif_number", ""))
+            if not tif:
+                continue
+            ensure_tif(tif)["has_annual_report_pdf"] = 1
+            add_year(tif, r.get("year"), "annual_report_pdf", r.get("tif_district", ""))
+
+    district_rows = []
+    year_rows = []
+    summary = {
+        "district_universe_rows": 0,
+        "district_year_universe_rows": 0,
+        "district_year_observed_any": 0,
+        "district_year_date_implied_only": 0,
+        "district_year_observed_no_date_interval": 0,
+    }
+
+    for tif in sorted(meta.keys(), key=tif_number_sort_key):
+        interval_years = set()
+        boundary_years = set()
+        programming_years = set()
+        for interval in intervals.get(tif, []):
+            start = max(interval["start_year"], start_year)
+            end = interval["end_year"] if interval["end_year"] is not None else end_year
+            end = min(end, end_year)
+            if end < start:
+                continue
+            years = set(range(start, end + 1))
+            interval_years.update(years)
+            if interval["source"] == "boundary":
+                boundary_years.update(years)
+            elif interval["source"] == "programming":
+                programming_years.update(years)
+
+        all_years = set(observed_years.get(tif, set())).union(interval_years)
+        all_years = {y for y in all_years if start_year <= y <= end_year}
+        canonical = best_name(tif)
+        name_variants = sorted({v["name"] for v in names.get(tif, {}).values() if v.get("name")}, key=str.lower)
+        name_keys = sorted(names.get(tif, {}).keys())
+        m = meta[tif]
+        approval_years = [date_year(x) for x in m["approval_dates"] if date_year(x) is not None]
+        expiration_years = [date_year(x) for x in m["expiration_dates"] if date_year(x) is not None]
+        repeal_years = [date_year(x) for x in m["repeal_dates"] if date_year(x) is not None]
+
+        district_rows.append(
+            {
+                "tif_number": tif,
+                "canonical_tif_district": canonical,
+                "district_name_variants": "; ".join(name_variants),
+                "district_name_keys": "; ".join(name_keys),
+                "first_year": min(all_years) if all_years else "",
+                "last_year": max(all_years) if all_years else "",
+                "first_observed_year": min(observed_years[tif]) if observed_years[tif] else "",
+                "last_observed_year": max(observed_years[tif]) if observed_years[tif] else "",
+                "first_active_year_implied": min(interval_years) if interval_years else "",
+                "last_active_year_implied": max(interval_years) if interval_years else "",
+                "approval_year_min": min(approval_years) if approval_years else "",
+                "expiration_year_max": max(expiration_years) if expiration_years else "",
+                "repeal_year_min": min(repeal_years) if repeal_years else "",
+                "approval_dates": "; ".join(sorted(m["approval_dates"])),
+                "expiration_dates": "; ".join(sorted(m["expiration_dates"])),
+                "repeal_dates": "; ".join(sorted(m["repeal_dates"])),
+                "observed_year_count": len(observed_years[tif]),
+                "implied_active_year_count": len(interval_years),
+                "has_legacy_finance": m["has_legacy_finance"],
+                "has_modern_panel": m["has_modern_panel"],
+                "has_annual_projects": m["has_annual_projects"],
+                "has_programming": m["has_programming"],
+                "has_boundary": m["has_boundary"],
+                "has_annual_report_pdf": m["has_annual_report_pdf"],
+                "source_flags": "; ".join(sorted(m["source_flags"])),
+            }
+        )
+
+        for year in sorted(all_years):
+            sources = year_sources.get((tif, year), set())
+            observed_any = 1 if sources else 0
+            active_implied = 1 if year in interval_years else 0
+            if observed_any and active_implied:
+                coverage = "observed_active"
+            elif observed_any:
+                coverage = "observed_no_date_interval"
+                summary["district_year_observed_no_date_interval"] += 1
+            else:
+                coverage = "date_implied_only"
+                summary["district_year_date_implied_only"] += 1
+            if observed_any:
+                summary["district_year_observed_any"] += 1
+            year_rows.append(
+                {
+                    "tif_number": tif,
+                    "canonical_tif_district": canonical,
+                    "year": year,
+                    "active_year_implied": active_implied,
+                    "observed_any": observed_any,
+                    "coverage_status": coverage,
+                    "source_flags": "; ".join(sorted(sources)),
+                    "observed_legacy_finance": 1 if "legacy_finance" in sources else 0,
+                    "observed_modern_panel": 1 if "modern_panel" in sources else 0,
+                    "observed_annual_projects": 1 if "annual_projects" in sources else 0,
+                    "observed_programming": 1 if "programming" in sources else 0,
+                    "observed_annual_report_pdf": 1 if "annual_report_pdf" in sources else 0,
+                    "has_boundary_interval": 1 if year in boundary_years else 0,
+                    "has_programming_interval": 1 if year in programming_years else 0,
+                    "approval_year_min": min(approval_years) if approval_years else "",
+                    "expiration_year_max": max(expiration_years) if expiration_years else "",
+                    "repeal_year_min": min(repeal_years) if repeal_years else "",
+                }
+            )
+
+    district_fields = [
+        "tif_number", "canonical_tif_district", "district_name_variants", "district_name_keys",
+        "first_year", "last_year", "first_observed_year", "last_observed_year",
+        "first_active_year_implied", "last_active_year_implied", "approval_year_min",
+        "expiration_year_max", "repeal_year_min", "approval_dates", "expiration_dates",
+        "repeal_dates", "observed_year_count", "implied_active_year_count",
+        "has_legacy_finance", "has_modern_panel", "has_annual_projects", "has_programming",
+        "has_boundary", "has_annual_report_pdf", "source_flags",
+    ]
+    year_fields = [
+        "tif_number", "canonical_tif_district", "year", "active_year_implied", "observed_any",
+        "coverage_status", "source_flags", "observed_legacy_finance", "observed_modern_panel",
+        "observed_annual_projects", "observed_programming", "observed_annual_report_pdf",
+        "has_boundary_interval", "has_programming_interval", "approval_year_min",
+        "expiration_year_max", "repeal_year_min",
+    ]
+    write_csv(out_district_csv, district_rows, district_fields)
+    write_csv(out_year_csv, year_rows, year_fields)
+
+    summary["district_universe_rows"] = len(district_rows)
+    summary["district_year_universe_rows"] = len(year_rows)
+    summary_rows = [{"metric": k, "value": v} for k, v in sorted(summary.items())]
+    write_csv(out_summary_csv, summary_rows, ["metric", "value"])
 
 
 
@@ -1836,6 +2130,17 @@ def main():
         output_dir / "tif_district_year_legacy_1998_2014.csv",
         output_dir / "tif_district_year_panel.csv",
         output_dir / "tif_district_year_panel_full_1998_2024.csv",
+    )
+
+    build_district_universe(
+        output_dir / "tif_district_year_panel_full_1998_2024.csv",
+        output_dir / "tif_district_boundaries.csv",
+        output_dir / "tif_district_programming_long.csv",
+        output_dir / "tif_projects_by_district_year.csv",
+        output_dir / "tif_document_inventory.csv",
+        output_dir / "tif_district_universe.csv",
+        output_dir / "tif_district_year_universe.csv",
+        output_dir / "tif_district_universe_summary.csv",
     )
 
     build_alderman_ward_year_tenure(

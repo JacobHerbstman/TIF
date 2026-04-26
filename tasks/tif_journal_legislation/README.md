@@ -36,6 +36,8 @@ All outputs are written under `tasks/tif_journal_legislation/output/`.
 - `tif_journal_page_text_index.csv`: one row per PDF page with text method, text hash, section hint, matched terms, and text sidecar path.
 - `page_text/`: extracted page text artifacts.
 - `tif_legislation_evidence_queue.csv`: one row per candidate event window, with page range, snippet, matched terms, suggested district/project, addresses, dollar amounts, and match suggestions.
+- `tif_district_legislation_candidates.csv`: district-level candidate rows extracted from the journal windows, with matched `tif_number` suggestions where the district already exists in the structured universe.
+- `tif_district_legislation_rollup_pre2010.csv`: one row per matched or unmatched district key, summarizing likely first journal event, first initial event, and first/largest funding candidates.
 - `tif_legislation_facts_review.csv`: handcoding template. Existing reviewed rows are preserved on rerun.
 - `tif_district_timeline_pre2010.csv`: confirmed district timeline facts derived only from reviewed rows.
 - `tif_project_deal_timeline_pre2010.csv`: confirmed project/deal timeline facts derived only from reviewed rows.

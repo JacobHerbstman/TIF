@@ -121,6 +121,9 @@ Useful variables:
 - `output/tif_project_spine.csv`
 - `output/tif_project_match_status.csv`
 - `output/tif_document_gap_queue.csv`
+- `output/tif_district_universe.csv`
+- `output/tif_district_year_universe.csv`
+- `output/tif_district_universe_summary.csv`
 - `output/tif_district_year_boundaries.csv`
 - `output/tif_district_year_panel.csv`
 - `output/tif_district_year_panel_full_1998_2024.csv`
